@@ -1,4 +1,4 @@
-# Debunker — evidence-based claim verification
+        # Debunker — evidence-based claim verification
 
 A fake news tool that retrieves evidence and shows its work, rather than
 guessing from writing style.
