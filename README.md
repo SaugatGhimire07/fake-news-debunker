@@ -1,4 +1,4 @@
-        # Debunker — evidence-based claim verification
+# Debunker — evidence-based claim verification
 
 A fake news tool that retrieves evidence and shows its work, rather than
 guessing from writing style.
@@ -15,7 +15,7 @@ retrieval-based system that the failure motivates.
 | Phase | Deliverable | State |
 |---|---|---|
 | 1 | Baseline classifier + falsification suite | **Complete** |
-| 2 | Fact Check API retrieval | Not started |
+| 2 | Fact Check API retrieval | **Complete** |
 | 3 | Web search + NLI stance model | Scaffold written (`debunker.py`) |
 | 4 | FEVER evaluation harness | Not started |
 | 5 | Streamlit interface | Not started |
@@ -224,18 +224,126 @@ about it. → phase 2.
 
 ---
 
+## Phase 2 — results
+
+Retrieval-only verification against the Google Fact Check Tools API. No machine
+learning. Given a claim, `factcheck.py` queries the corpus of claims that
+professional fact-checkers have already investigated and returns their verdicts,
+normalized to SUPPORTED / REFUTED / UNCLEAR / NO_MATCH.
+
+### Setup
+
+The Claim Search API needs only an API key — no OAuth, no billing account.
+Enable "Fact Check Tools API" in a Google Cloud project, create an API key,
+restrict it to that single API, then:
+
+```bash
+export GOOGLE_FACTCHECK_KEY="your-key"
+python factcheck.py "vaccines cause autism"
+python factcheck.py --demo          # runs the six Phase 1 adversarial claims
+```
+
+### 2.1 The rating-normalization problem
+
+The API returns, per claim, one or more `claimReview` records with a
+`textualRating` field. **That field is free text, not an enum** — every
+publisher writes their own. Real strings seen in testing:
+
+- `"Flawed Paper"` (FactCheck.org)
+- `"False"`, `"Pants on Fire"` (PolitiFact)
+- `"Four Pinocchios"` (Washington Post)
+- `"Vaccines do not cause autism, and an increase in diagnosis..."` (a full sentence)
+
+Mapping this to a clean verdict is the one real piece of engineering in Phase 2.
+`classify_rating()` uses ordered regex patterns and is deliberately
+conservative: mixed/hedged ratings and anything unrecognized become UNCLEAR
+rather than a guess. Known gaps, documented rather than hidden:
+
+| Rating string | Mapped to | Correct? |
+|---|---|---|
+| `False`, `Pants on Fire`, `Flawed Paper` | REFUTED | yes |
+| `True`, `Correct` | SUPPORTED | yes |
+| `Mostly False` | UNCLEAR | conservative — arguably REFUTED |
+| `Four Pinocchios` | UNCLEAR | **miss** — no keyword matches |
+| `Scam` | UNCLEAR | **miss** — arguably REFUTED |
+
+Rating vocabularies are unbounded, so this classifier needs ongoing tuning
+against whichever publishers actually appear. The rate of UNCLEAR-by-
+non-recognition is itself a metric worth tracking.
+
+### 2.2 The six adversarial claims
+
+The same six statements the Phase 1 style model failed on, now sent to real
+fact-checkers:
+
+| Claim | Style model (Phase 1) | Fact Check API (Phase 2) | Correct? |
+|---|---|---|---|
+| vaccines cause autism | style guess | REFUTED, 5 sources | yes |
+| Great Wall from Moon | right by accident | REFUTED (Snopes) | yes |
+| 2020 election stolen | — | REFUTED, 5 sources | yes |
+| bleach cures infections | 0.02 fake (wrong) | NO_MATCH | honest gap |
+| 5G spreads covid | — | REFUTED, 0.89 (diluted) | mostly |
+| Earth orbits the Sun | 0.78 fake (wrong) | **REFUTED (inverted — wrong)** | **no** |
+
+The vaccine claim returned five current fact-checks, one dated the same month as
+the query. Where the Phase 1 model scored this on whether it *sounded* like
+Reuters, Phase 2 reports what fact-checkers actually concluded.
+
+### 2.3 The new failure mode
+
+**The API does fuzzy TOPIC matching, not exact CLAIM matching.** Two rows above
+are wrong for the same structural reason, and neither is a coding bug:
+
+- **"the Earth orbits the Sun" → REFUTED.** A *true* statement labeled false.
+  The query matched a USA Today review of a *different* claim — photos alleging
+  the sun orbits the earth — and inherited its "False" rating. High word
+  overlap, opposite meaning.
+- **5G confidence diluted to 0.89.** One retrieved review — "China was the first
+  place to have over 100,000 5G towers" — is a different claim entirely, but was
+  swept into the same query and voted in the aggregate.
+
+Phase 2 has no mechanism to check whether a retrieved fact-check actually
+addresses the queried claim. Every REFUTED it emits is only trustworthy if a
+human reads the matched `claim_text` and confirms it is the same claim.
+
+**Design decision:** this failure is left unpatched on purpose. A cheap
+lexical-overlap guard would catch the 5G intruder but *not* the Earth/Sun
+inversion (high overlap, opposite meaning), fixing the easy half of the problem
+while hiding the dangerous half. Relevance filtering — "is this evidence about
+*this* claim, and in which direction" — is exactly what the Phase 3 NLI stage
+does. The Earth/Sun pair is kept as the motivating before/after case for it.
+
+### What phase 2 establishes
+
+1. Retrieval delivers high-precision verdicts *conditional on* the matched claim
+   being the same claim — a condition Phase 2 cannot itself verify.
+2. Free-text ratings cannot be perfectly normalized; honest systems route the
+   unrecognized to UNCLEAR and measure how often that happens.
+3. The corpus can confirm a claim is false but rarely that it is true — nobody
+   fact-checks true statements, so NO_MATCH is the common, correct answer for
+   true claims and cannot be read as either verdict.
+4. Topic-matching without a relevance check produces confident, inverted errors
+   (Earth/Sun). → phase 3 NLI.
+
+---
+
 ## Repository
 
 ```
 .
-├── baseline.py        # TF-IDF + logistic regression, ISOT and LIAR loaders
-├── falsify.py         # four falsification experiments
-├── debunker.py        # phase 3 retrieval pipeline scaffold
+├── baseline.py        # phase 1: TF-IDF + logistic regression, ISOT/LIAR loaders
+├── falsify.py         # phase 1: four falsification experiments
+├── factcheck.py       # phase 2: Fact Check API retrieval + rating normalization
+├── debunker.py        # phase 3: full retrieval pipeline scaffold
 ├── requirements.txt
+├── .cache/factcheck/  # cached API responses (gitignored)
 └── data/
     ├── isot/{True.csv, Fake.csv}
     └── liar/{train.tsv, valid.tsv, test.tsv}
 ```
+
+Add to `.gitignore`: `.cache/`, `.venv/`, `data/`, `*.joblib`, and any `.env`.
+Never commit the API key.
 
 ## Reproducing phase 1
 
@@ -264,6 +372,17 @@ something about claim register rather than about which scraper produced a file:
 python baseline.py --dataset liar --data-dir data/liar --save models/liar_prior.joblib
 ```
 
+## Reproducing phase 2
+
+```bash
+pip install requests
+export GOOGLE_FACTCHECK_KEY="your-key"    # Google Cloud > Fact Check Tools API
+python factcheck.py --demo
+```
+
+Responses cache to `.cache/factcheck/`; re-runs cost no API quota. Use
+`--no-cache` to force a live call.
+
 ---
 
 ## Caveats
@@ -286,19 +405,28 @@ Stated up front so a reviewer does not have to raise them.
 - **LIAR's 6 ordinal labels were collapsed to binary** to make the ISOT
   comparison fair on class count. The 6-way task is harder and scores much
   lower; this choice is deliberate and should be stated in any writeup.
+- **Phase 2's `classify_rating` is regex over free text.** It has documented
+  misses (`Four Pinocchios`, `Scam` → UNCLEAR) and will need extending as new
+  publishers appear. It is not a learned component.
+- **Phase 2 verdicts are unvalidated for relevance.** A REFUTED can be inverted
+  when the API matches a related-but-opposite claim (see the Earth/Sun case).
+  Do not trust a Phase 2 verdict without reading the matched claim text; the
+  Phase 3 NLI stage is what makes this safe.
+- **The six-claim demo is an illustration, not a benchmark.** Phase 4 (FEVER)
+  is where retrieval quality gets measured properly, with per-class F1.
 
 ---
 
 ## Roadmap
 
-**Phase 2 — retrieval only.** Google Cloud project, Fact Check Tools API
-enabled. Claim in, existing fact-checks out. No ML. Expected to outperform
-everything above with zero trained parameters.
-
-**Phase 3 — evidence pipeline.** Web search behind a swappable interface,
-cross-encoder reranking, NLI stance classification, verdict aggregation
-weighting professional fact-checks above general web results. Scaffold is in
-`debunker.py`.
+**Phase 3 — evidence pipeline (next).** The relevance filter Phase 2 lacks.
+NLI stance classification takes `(retrieved_evidence, claim)` and asks whether
+the evidence actually addresses the claim and in which direction — the fix for
+the Earth/Sun inversion. Plus web search behind a swappable interface (for the
+NO_MATCH cases like the bleach claim), cross-encoder reranking, and verdict
+aggregation weighting professional fact-checks above general web results.
+First test on resumption: run the Earth/Sun pair through NLI and confirm it
+flags the mismatch Phase 2 could not. Scaffold is in `debunker.py`.
 
 **Phase 4 — evaluation.** FEVER, reporting per-class F1 rather than accuracy.
 NOT ENOUGH INFO is where these systems fail and where honest reporting matters.

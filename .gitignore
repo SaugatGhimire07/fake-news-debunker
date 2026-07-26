@@ -1,5 +1,20 @@
+# virtual environment
 .venv/
+
+# python bytecode
 __pycache__/
 *.pyc
+
+# trained models and datasets 
 models/
 data/
+
+# cached Fact Check API responses
+.cache/
+
+# secrets 
+.env
+*.env
+
+# macOS
+.DS_Store
