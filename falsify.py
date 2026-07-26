@@ -10,6 +10,7 @@ SEED = 42
 
 
 def _split(df):
+    # Reuse the same train/test split logic across experiments to keep comparisons consistent.
     return train_test_split(df["text"], df["label"], test_size=0.2,
                             random_state=SEED, stratify=df["label"])
 
@@ -114,6 +115,7 @@ def exp4_adversarial(isot_dir: str) -> None:
     isot = load_isot(isot_dir)
     pipe = build_pipeline().fit(isot["text"], isot["label"])
 
+    # Feed the hand-written adversarial examples through the trained model to inspect failures.
     texts = [t for t, _, _ in ADVERSARIAL]
     preds = pipe.predict(texts)
     probs = pipe.predict_proba(texts)[:, 1]

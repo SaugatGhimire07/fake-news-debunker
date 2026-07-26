@@ -55,6 +55,7 @@ def classify_rating(rating: str) -> tuple[Verdict, str]:
 
     # Mixed checked before the others: "mostly false" contains "false" but is
     # genuinely a mixed verdict, so it must win.
+    # This keeps borderline ratings from being overconfidently classified as fully false.
     if _MIXED.search(r):
         return "UNCLEAR", "mixed / needs-context rating"
     if _REFUTED.search(r):
@@ -143,6 +144,7 @@ def search(query: str, lang: str = "en", size: int = 10,
     reviews: list[Review] = []
 
     for claim in data.get("claims", []):
+        # Each API claim can have multiple review entries, so flatten them into one list.
         ctext = claim.get("text", "")
         claimant = claim.get("claimant", "")
         cdate = claim.get("claimDate", "")

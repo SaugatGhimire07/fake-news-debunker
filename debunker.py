@@ -68,6 +68,7 @@ def load_input(source: str) -> str:
     """Accepts raw text or a URL. Returns clean article body text."""
     if not source.startswith("http"):
         return source
+    # For URL input, fetch the page and strip boilerplate before extracting claims.
     import trafilatura
     downloaded = trafilatura.fetch_url(source)
     if downloaded is None:
@@ -92,6 +93,7 @@ _HEDGE = re.compile(r"\b(i think|maybe|perhaps|in my opinion|should|ought to)\b"
 
 
 def extract_claims(text: str, max_claims: int = 5) -> list[str]:
+    # Split the article into sentences and keep the ones that look check-worthy.
     sentences = [s.strip() for s in _SENT_SPLIT.split(text) if len(s.split()) >= 6]
     scored = []
     for s in sentences:

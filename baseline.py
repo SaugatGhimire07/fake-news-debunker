@@ -32,6 +32,7 @@ def load_isot(data_dir: str | Path, strip_dateline: bool = False) -> pd.DataFram
     fake_df["label"] = 1
 
     df = pd.concat([true_df, fake_df], ignore_index=True)
+    # Combine the title and body into one text field so the classifier sees the full article.
     df["text"] = (df["title"].fillna("") + " " + df["text"].fillna("")).str.strip()
 
     if strip_dateline:
@@ -120,6 +121,7 @@ def main() -> None:
 
     if args.dataset == "isot":
         df = load_isot(args.data_dir, strip_dateline=args.strip_dateline)
+        # Keep class proportions balanced across train and test splits for a fair evaluation.
         X_tr, X_te, y_tr, y_te = train_test_split(
             df["text"], df["label"], test_size=0.2,
             random_state=args.seed, stratify=df["label"],
