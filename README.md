@@ -16,7 +16,7 @@ retrieval-based system that the failure motivates.
 |---|---|---|
 | 1 | Baseline classifier + falsification suite | **Complete** |
 | 2 | Fact Check API retrieval | **Complete** |
-| 3 | Web search + NLI stance model | Scaffold written (`debunker.py`) |
+| 3 | Web search + NLI stance model | **Core complete** (gate calibration → Phase 4) |
 | 4 | FEVER evaluation harness | Not started |
 | 5 | Streamlit interface | Not started |
 
@@ -327,23 +327,128 @@ does. The Earth/Sun pair is kept as the motivating before/after case for it.
 
 ---
 
+## Phase 3 — results
+
+Phase 2 established that a fact-check should only count toward a verdict if it is
+actually *about* the queried claim. Phase 3 attempts to enforce that with a
+two-model pipeline: a relevance gate, then an NLI stance model. The gate is the
+new component; the finding is that no off-the-shelf single signal implements it
+cleanly.
+
+### 3.1 The pipeline
+
+```
+evidence + claim
+      -> RelevanceGate   (is this evidence about the claim at all?)  -> drop if not
+      -> StanceModel     (NLI: entailment / contradiction / neutral) -> vote if clear
+```
+
+Only evidence that is *both* relevant *and* has a clear stance votes.
+Implemented in `stance.py`; `decide_verdict()` checks relevance **first** and
+returns IRRELEVANT before it ever inspects the stance score. Verdict/aggregation
+logic is unit-tested without the models.
+
+Stance model: `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`, label map confirmed
+on-device as `{0: entailment, 1: neutral, 2: contradiction}`.
+
+### 3.2 The finding that reshaped the phase: stance ≠ relevance
+
+The initial assumption was that off-topic evidence would register as NLI
+*neutral*. It does not. NLI answers "if the premise is true, is the hypothesis
+true?" — not "is this on topic?". Five off-topic climate reviews all scored
+**contradiction ≈ 0.99** against "climate change is a hoax", because the model
+knows climate change is real and scores anything consistent with that reality as
+contradicting "hoax". The model's pretraining prior leaks into the stance label.
+
+Consequence: relevance and stance are separate questions requiring separate
+signals. Stance alone cannot gate.
+
+### 3.3 The gate works structurally, but the signal is miscalibrated
+
+Running the relevance-gated pipeline on the Phase 2 failure cases:
+
+- **Earth/Sun** → SUPPORTED. Relevance +6.23, entailment 0.99. The Phase 2
+  inversion is fixed.
+- **Climate hoax** → the five off-topic distractors were gated out (relevance
+  −9 to −11) despite contradiction ≈ 0.99. Phase 2's failure mode is gone.
+- **But** the one *legitimate* rebuttal ("multiple independent temperature
+  records confirm...") was also gated out at −5.53 — the gate filtered signal
+  along with noise. Verdict came back NOT_ENOUGH_INFO when good evidence existed.
+
+The default threshold (0.0) was a guess. This motivated calibration.
+
+### 3.4 Calibration: no single signal separates cleanly
+
+`calibrate_relevance.py` scores 18 hand-labeled (claim, evidence, is_relevant)
+pairs across four claims, with relevance labeled **independently of stance**
+(an on-topic rebuttal is relevant; an off-topic supporting fact is not). Two
+candidate relevance signals, same labeled set:
+
+| Signal | Best labelling accuracy | Fails on |
+|---|---|---|
+| Cross-encoder (ms-marco passage relevance) | **0.83** | reframed rebuttals — low lexical overlap |
+| NLI (1 − neutral probability) | **0.67** | claims the model has priors on |
+
+Both overlap; neither admits a clean threshold. Crucially, **they fail on
+disjoint subsets**:
+
+- The **cross-encoder** rewards lexical overlap, so rebuttals that *reframe* the
+  claim ("temperature records", "97% consensus", "audits and recounts") score
+  below distractors that *echo* its vocabulary ("voter turnout", "the moon
+  orbits the earth"). Fact-checking wants the opposite: the best rebuttals often
+  avoid the claim's own framing.
+- The **NLI neutral-score** reflects the model's prior strength, not aboutness.
+  Off-topic climate distractors scored as falsely relevant (the model has loud
+  opinions on climate); a genuine but dryly-factual vaccine rebuttal ("the 1998
+  study was retracted") sank to 0.25 (read as a neutral historical fact).
+
+The retracted-study pair is the clearest case: cross-encoder +2.04 (correctly
+relevant), NLI 0.25 (wrongly irrelevant). The signals **disagree on the same
+pair and the cross-encoder is right** — complementary blind spots, not two
+equally broken tools.
+
+### What phase 3 establishes
+
+1. A relevance gate is necessary: it demonstrably removes the confident
+   off-topic votes Phase 2 could not (Earth/Sun fixed, climate distractors
+   dropped).
+2. NLI stance cannot double as the gate — its label leaks pretraining priors.
+3. No single off-the-shelf relevance signal separates on-topic from off-topic
+   cleanly. Cross-encoder (0.83) beats NLI-neutral (0.67) but both overlap, and
+   they err on disjoint subsets.
+4. The labeled set (18 hand-picked pairs, 3 of 4 claims ones the model has
+   priors on) is large enough to *diagnose* signals but too small and too biased
+   to *calibrate* a trustworthy threshold. Fitting a combiner to it would repeat
+   the overfitting the project has avoided since Phase 1. → measure candidate
+   gates on FEVER (Phase 4), where claims are diverse and the model has no
+   special opinions.
+
+**Interim setting:** because neither gate is surgical, `stance.py` keeps the gate
+permissive and leans on stance confidence plus requiring multiple agreeing pieces
+to carry a verdict, rather than trusting the gate to be precise. The principled
+gate is deferred to Phase 4 evaluation.
+
+---
+
 ## Repository
 
 ```
 .
-├── baseline.py        # phase 1: TF-IDF + logistic regression, ISOT/LIAR loaders
-├── falsify.py         # phase 1: four falsification experiments
-├── factcheck.py       # phase 2: Fact Check API retrieval + rating normalization
-├── debunker.py        # phase 3: full retrieval pipeline scaffold
+├── baseline.py             # phase 1: TF-IDF + logistic regression, ISOT/LIAR loaders
+├── falsify.py              # phase 1: four falsification experiments
+├── factcheck.py            # phase 2: Fact Check API retrieval + rating normalization
+├── stance.py               # phase 3: relevance gate + NLI stance + aggregation
+├── calibrate_relevance.py  # phase 3: relevance-signal separation analysis
+├── debunker.py             # full retrieval pipeline scaffold
 ├── requirements.txt
-├── .cache/factcheck/  # cached API responses (gitignored)
+├── .cache/factcheck/       # cached API responses (gitignored)
 └── data/
     ├── isot/{True.csv, Fake.csv}
     └── liar/{train.tsv, valid.tsv, test.tsv}
 ```
 
-Add to `.gitignore`: `.cache/`, `.venv/`, `data/`, `*.joblib`, and any `.env`.
-Never commit the API key.
+Add to `.gitignore`: `.cache/`, `.venv/`, `data/`, `models/`, `*.joblib`, and
+any `.env`. Never commit the API key.
 
 ## Reproducing phase 1
 
@@ -419,17 +524,18 @@ Stated up front so a reviewer does not have to raise them.
 
 ## Roadmap
 
-**Phase 3 — evidence pipeline (next).** The relevance filter Phase 2 lacks.
-NLI stance classification takes `(retrieved_evidence, claim)` and asks whether
-the evidence actually addresses the claim and in which direction — the fix for
-the Earth/Sun inversion. Plus web search behind a swappable interface (for the
-NO_MATCH cases like the bleach claim), cross-encoder reranking, and verdict
-aggregation weighting professional fact-checks above general web results.
-First test on resumption: run the Earth/Sun pair through NLI and confirm it
-flags the mismatch Phase 2 could not. Scaffold is in `debunker.py`.
+**Phase 3 — evidence pipeline (core complete).** Relevance gate + NLI stance in
+`stance.py`, with `calibrate_relevance.py` for signal analysis. Fixed the
+Earth/Sun inversion; established that no single off-the-shelf relevance signal
+gates cleanly (see Phase 3 results). Web search for the NO_MATCH cases (bleach
+claim) and a principled combined gate remain, both gated on Phase 4 measurement.
 
-**Phase 4 — evaluation.** FEVER, reporting per-class F1 rather than accuracy.
-NOT ENOUGH INFO is where these systems fail and where honest reporting matters.
+**Phase 4 — evaluation (next).** FEVER, reporting per-class F1 rather than
+accuracy. Two jobs: (a) measure the end-to-end pipeline, and (b) settle Phase 3's
+open question by evaluating candidate relevance gates — cross-encoder, NLI-neutral,
+and a combination — on diverse claims the model has no priors on, where the
+18-pair hand-labeled set could not give a trustworthy answer. NOT ENOUGH INFO is
+where these systems fail and where honest reporting matters.
 
 **Phase 5 — interface.** Streamlit. Paste a URL, get claim-by-claim verdicts
 with clickable sources.
