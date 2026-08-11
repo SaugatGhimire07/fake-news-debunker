@@ -40,15 +40,13 @@ STANCE_MODEL = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
 # signal separates on-topic from off-topic cleanly. The cross-encoder peaked at
 # 0.83 labelling accuracy; NLI-neutral was worse at 0.67; they err on disjoint
 # subsets. Rather than fit a threshold to 18 hand-picked examples (the Phase 1
-# overfitting trap), the interim gate is deliberately PERMISSIVE -- it only
-# rejects evidence the cross-encoder scores clearly off-topic -- and the verdict
-# leans on stance confidence plus corroboration (REQUIRE_MIN_VOTES) instead of
-# trusting the gate to be surgical. The principled gate is settled in Phase 4
-# against FEVER, where claims are diverse and the model has no priors.
+# overfitting trap), Phase 3 left the gate deliberately permissive.
 #
-# -6.0 sits below every genuinely-relevant pair in the labeled set except two
-# reframed rebuttals, and above the clearly off-topic cluster (-8 to -11).
-RELEVANCE_THRESHOLD = -6.0
+# Phase 4 UPDATE: on a 30-claim FEVER tuning set, threshold 0.0 strictly beat
+# -6.0 (accuracy 0.70 vs 0.60, NEI F1 0.60 vs 0.35) by dropping tangential
+# evidence that had been voting on NEI claims. Validated on a held-out 300-claim
+# sample (seed 7): accuracy 0.657, honest-NEI rate 1.00. 0.0 is the default.
+RELEVANCE_THRESHOLD = 0.0
 
 # NLI must be reasonably confident before a piece of evidence is allowed to vote.
 STANCE_MIN_CONFIDENCE = 0.60
