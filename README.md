@@ -17,7 +17,7 @@ retrieval-based system that the failure motivates.
 | 1 | Baseline classifier + falsification suite | **Complete** |
 | 2 | Fact Check API retrieval | **Complete** |
 | 3 | Web search + NLI stance model | **Core complete** (gate calibration → Phase 4) |
-| 4 | FEVER evaluation harness | Not started |
+| 4 | FEVER evaluation harness | **Complete** |
 | 5 | Streamlit interface | Not started |
 
 ---
@@ -430,6 +430,141 @@ gate is deferred to Phase 4 evaluation.
 
 ---
 
+## Phase 4 — results
+
+The first evaluation on a labelled benchmark, and the phase that settles the
+Phase 3 threshold question. Measures the **full pipeline** — retrieval, gate,
+stance, aggregation — against FEVER, reporting per-class F1 on a held-out sample.
+
+### 4.1 Scope: full-pipeline eval on FEVER, not gold-evidence
+
+FEVER labels claims Supported / Refuted / NotEnoughInfo against Wikipedia. Two
+evaluation designs were considered:
+
+- **Gold-evidence** — feed the pipeline FEVER's annotated evidence sentences and
+  measure only the stance layer. *Abandoned*: the parquet conversion of
+  `labelled_dev` flattened `evidence_sentence_id` to −1 for every row, losing the
+  sentence-level pointer. Only page titles survive, so gold evidence cannot be
+  resolved to text from this source without the full Wikipedia dump.
+- **Full pipeline (chosen)** — retrieve evidence from the project's *own* sources
+  (Fact Check API + Tavily web search), run the gate + stance + aggregation, and
+  score against FEVER's labels. This measures the system as it actually works.
+  It conflates retrieval and stance quality, but for *this* pipeline that is fair:
+  retrieval is part of the system.
+
+Loading note: `fever/fever` still ships a loading script, so `load_dataset` fails
+on `datasets ≥ 4.5` (same wall as LIAR). Fixed by reading the auto-converted
+parquet file directly by path (`fever_load.py`).
+
+### 4.2 Method
+
+`fever_eval.py`: stratified sample (equal per label, fixed seed), retrieve from
+both sources, clean evidence to prose (drop infobox/table rows), run through the
+relevance gate + NLI stance, aggregate, map the pipeline's verdict vocabulary to
+FEVER's three labels, score per class.
+
+**Threshold tuning, honestly.** The Phase 3 relevance threshold (−6.0) was a
+guess. A 30-claim tuning run (seed 42) compared it against 0.0:
+
+| threshold | accuracy | SUPPORTS F1 | REFUTES F1 | NEI F1 |
+|---|---|---|---|---|
+| −6.0 | 0.600 | 0.783 | 0.600 | 0.353 |
+| 0.0 | **0.700** | 0.818 | 0.667 | **0.600** |
+
+0.0 was strictly better — NEI F1 nearly doubled with no cost to the other
+classes, because tighter gating dropped tangential evidence that had been voting
+on NEI claims. **The final run uses a different seed (7)** so the reported numbers
+are on claims the threshold was *not* tuned on.
+
+### 4.3 Headline result (300 claims, seed 7, held out)
+
+```
+                    prec    rec     f1   support
+SUPPORTS           0.757  0.810  0.783     100
+REFUTES            0.707  0.580  0.637     100
+NOT ENOUGH INFO    0.523  0.580  0.550     100
+
+overall accuracy: 0.657   (n=300)
+```
+
+```
+confusion matrix (rows=gold, cols=pred)
+                  SUPPORTS  REFUTES  NEI
+SUPPORTS               81        1   18
+REFUTES                 7       58   35
+NOT ENOUGH INFO        19       23   58
+```
+
+The held-out NEI F1 (0.55) came in below the tuning-set figure (0.60), as
+expected — the small gap indicates 0.0 was not badly overfit.
+
+### 4.4 The honest-NEI result
+
+Retrieval coverage was **300/300** — every claim got evidence, so no NEI
+prediction is the accidental product of empty retrieval. Of 58 correct NEI
+predictions, **all 58 were reasoned** (evidence retrieved, examined, and judged
+insufficient), not default abstentions:
+
+```
+NEI predictions:        empty retrieval 0  |  reasoned 111
+correct NEI:            58, of which reasoned 58   ->  honest-NEI rate 1.00
+```
+
+This is the metric a careless harness would hide by merging "abstained because
+retrieval was empty" with "abstained because evidence didn't resolve the claim".
+When this pipeline says NOT ENOUGH INFO, it means it.
+
+### 4.5 Error structure
+
+The mistakes are structured, not random:
+
+- **SUPPORTS is strongest** (81/100). When evidence supports a claim, the
+  pipeline finds it and commits.
+- **REFUTES leaks into NEI** (35/100). Refutation often needs evidence to
+  *directly* contradict; with `REQUIRE_MIN_VOTES = 2`, a single clean
+  contradiction abstains rather than commits. The system is conservative under
+  uncertainty.
+- **NEI errors split** between SUPPORTS (19) and REFUTES (23) — partly genuine
+  over-commitment (topically-relevant evidence read as a verdict), partly a
+  benchmark artifact (see 4.6).
+
+### 4.6 The open-web vs. FEVER-NEI mismatch
+
+Hand-inspection of NEI errors (via `--inspect "NOT ENOUGH INFO" REFUTES`) found
+that many are **not model errors at all**. FEVER's NEI means "the single
+Wikipedia page shown to annotators did not verify this claim" — not "this claim
+is unverifiable in principle." Examples where the pipeline predicted REFUTES on a
+gold-NEI claim:
+
+- *"Gaius Julius Caesar was born in 130 BC in Rome"* — web evidence gives 100 BC,
+  correctly contradicting the claim.
+- *"Finding Dory was directed by Harry S. Truman"* — web evidence gives Andrew
+  Stanton, correctly contradicting.
+
+Open-web retrieval resolves claims FEVER's single-page protocol left unverifiable.
+These "errors" are the pipeline being *more* correct than the closed-corpus label
+allows — a direct echo of the Phase 1 thesis: **the benchmark measures something
+narrower than truth.** Some NEI errors are genuine over-commitment (tangential
+evidence voting), but a meaningful fraction are this definitional mismatch.
+
+### What phase 4 establishes
+
+1. The full pipeline reaches **0.657 accuracy** on a held-out 300-claim FEVER
+   sample, with the classic profile: SUPPORTS easiest, NEI hardest.
+2. Relevance-gate threshold, tuned on a disjoint set and validated held-out, is a
+   real lever: 0.0 beat −6.0 on every class. The Phase 3 "no clean threshold"
+   result was on 18 biased pairs; on diverse FEVER claims a usable operating point
+   exists.
+3. **Honest-NEI rate 1.00**: every correct abstention is reasoned, none is an
+   artifact of empty retrieval. Coverage 300/300 makes this measurable.
+4. The system is precise when it commits and conservative under uncertainty
+   (REFUTES→NEI leakage from the 2-vote rule).
+5. A meaningful share of NEI "errors" are open-web verification succeeding where
+   FEVER's single-page annotation could not — the benchmark, not the pipeline,
+   is the limiting factor there.
+
+---
+
 ## Repository
 
 ```
@@ -439,9 +574,13 @@ gate is deferred to Phase 4 evaluation.
 ├── factcheck.py            # phase 2: Fact Check API retrieval + rating normalization
 ├── stance.py               # phase 3: relevance gate + NLI stance + aggregation
 ├── calibrate_relevance.py  # phase 3: relevance-signal separation analysis
+├── fever_load.py           # phase 4: FEVER parquet loader (script-free)
+├── web_search.py           # phase 4: Tavily web retrieval, cached
+├── fever_eval.py           # phase 4: full-pipeline FEVER evaluation harness
 ├── debunker.py             # full retrieval pipeline scaffold
 ├── requirements.txt
-├── .cache/factcheck/       # cached API responses (gitignored)
+├── .cache/factcheck/       # cached fact-check responses (gitignored)
+├── .cache/web/             # cached web-search responses (gitignored)
 └── data/
     ├── isot/{True.csv, Fake.csv}
     └── liar/{train.tsv, valid.tsv, test.tsv}
@@ -488,6 +627,29 @@ python factcheck.py --demo
 Responses cache to `.cache/factcheck/`; re-runs cost no API quota. Use
 `--no-cache` to force a live call.
 
+## Reproducing phase 3
+
+```bash
+pip install torch transformers sentence-transformers sentencepiece
+python stance.py                 # relevance-gated stance on the Phase 2 cases
+python calibrate_relevance.py    # cross-encoder vs NLI-neutral separation analysis
+```
+
+## Reproducing phase 4
+
+```bash
+pip install datasets
+export GOOGLE_FACTCHECK_KEY="your-key"
+export TAVILY_KEY="tvly-your-key"          # tavily.com, free tier
+
+python fever_eval.py --per-label 10                              # tiny debug run
+python fever_eval.py --per-label 100 --seed 7 --relevance-threshold 0.0  # headline run
+python fever_eval.py --inspect "NOT ENOUGH INFO" REFUTES         # error analysis
+```
+
+Web responses cache to `.cache/web/`; re-runs and `--inspect` cost no credits.
+The headline run is ~300 Tavily credits (within the free monthly tier).
+
 ---
 
 ## Caveats
@@ -519,6 +681,19 @@ Stated up front so a reviewer does not have to raise them.
   Phase 3 NLI stage is what makes this safe.
 - **The six-claim demo is an illustration, not a benchmark.** Phase 4 (FEVER)
   is where retrieval quality gets measured properly, with per-class F1.
+- **Phase 4 evaluates on n=300.** Enough for a stable class profile and a held-out
+  threshold check, not for tight confidence intervals. Numbers are indicative.
+- **Retrieval and stance quality are conflated in Phase 4.** Full-pipeline scoring
+  means a wrong verdict could be bad retrieval or bad stance. This is deliberate
+  (retrieval is part of the system) but limits attribution of individual errors.
+- **A share of Phase 4 NEI "errors" are FEVER-protocol artifacts,** not model
+  errors — open-web evidence resolves claims FEVER marks unverifiable. The 0.657
+  accuracy therefore understates the pipeline's real-world correctness by some
+  amount; §4.6 has the argument but the fraction is not yet quantified by
+  systematic adjudication.
+- **The 0.0 relevance threshold was tuned on 30 claims (seed 42) and validated on
+  300 (seed 7).** Held-out validation guards against gross overfitting, but a
+  larger tuning set would give a more stable operating point.
 
 ---
 
@@ -530,12 +705,12 @@ Earth/Sun inversion; established that no single off-the-shelf relevance signal
 gates cleanly (see Phase 3 results). Web search for the NO_MATCH cases (bleach
 claim) and a principled combined gate remain, both gated on Phase 4 measurement.
 
-**Phase 4 — evaluation (next).** FEVER, reporting per-class F1 rather than
-accuracy. Two jobs: (a) measure the end-to-end pipeline, and (b) settle Phase 3's
-open question by evaluating candidate relevance gates — cross-encoder, NLI-neutral,
-and a combination — on diverse claims the model has no priors on, where the
-18-pair hand-labeled set could not give a trustworthy answer. NOT ENOUGH INFO is
-where these systems fail and where honest reporting matters.
+**Phase 4 — evaluation (complete).** Full-pipeline FEVER evaluation in
+`fever_eval.py`: 0.657 accuracy on a held-out 300-claim sample, honest-NEI rate
+1.00, with the relevance threshold tuned on a disjoint set and validated held-out
+(see Phase 4 results). Optional follow-ups: systematic adjudication of NEI errors
+to quantify the FEVER-protocol-mismatch fraction, and testing `--min-votes 1` to
+address REFUTES→NEI leakage.
 
 **Phase 5 — interface.** Streamlit. Paste a URL, get claim-by-claim verdicts
 with clickable sources.
