@@ -1,0 +1,6 @@
+streamlit>=1.38
+torch>=2.3
+transformers>=4.44
+sentence-transformers>=3.0
+sentencepiece>=0.2.0
+requests>=2.32
