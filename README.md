@@ -3,10 +3,13 @@
 A fake news tool that retrieves evidence and shows its work, rather than
 guessing from writing style.
 
+**[▶ Live demo](https://fake-news-debunker-h8byas7dbwzxnm6wy2rtl7.streamlit.app)** — type a claim, watch the pipeline retrieve evidence, filter it for relevance, and reach a verdict with its sources shown. (Free-tier host; if it's asleep, give it ~30s to wake and load the models.)
+
 **Thesis:** you cannot determine whether a claim is true by examining how it is
-written. Weekend 1 of this project is a documented failure analysis proving that
+written. Phase 1 of this project is a documented failure analysis proving that
 point on the field's most-used benchmark. The remaining phases build the
-retrieval-based system that the failure motivates.
+retrieval-based system that the failure motivates, ending in a deployed
+interactive app.
 
 ---
 
@@ -18,7 +21,7 @@ retrieval-based system that the failure motivates.
 | 2 | Fact Check API retrieval | **Complete** |
 | 3 | Web search + NLI stance model | **Core complete** (gate calibration → Phase 4) |
 | 4 | FEVER evaluation harness | **Complete** |
-| 5 | Streamlit interface | Not started |
+| 5 | Streamlit interface | **Complete** — [live](https://fake-news-debunker-h8byas7dbwzxnm6wy2rtl7.streamlit.app) |
 
 ---
 
@@ -39,16 +42,16 @@ fact-checking literature — document retrieval, evidence selection, verdict
 prediction — with the trained classifier demoted to a triage signal rather than
 a source of verdicts.
 
-**Planned components**
+**Components** (★ = in the shipped app; others were prototyped or explored)
 
-| Stage | Choice |
-|---|---|
-| Article extraction | `trafilatura` |
-| Fact-check corpus | Google Fact Check Tools API (free, API key only) |
-| Web evidence | Tavily (1,000 free credits/month), provider-swappable |
-| Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
-| Stance | `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` |
-| Triage prior | LIAR-trained TF-IDF + logistic regression |
+| Stage | Choice | |
+|---|---|---|
+| Fact-check corpus | Google Fact Check Tools API (free, API key only) | ★ |
+| Web evidence | Tavily (1,000 free credits/month), provider-swappable | ★ |
+| Relevance gate | `cross-encoder/ms-marco-MiniLM-L-6-v2` | ★ |
+| Stance | `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` | ★ |
+| Article extraction | `trafilatura` (for URL input) | prototyped |
+| Triage prior | LIAR-trained TF-IDF + logistic regression | Phase 1 baseline |
 
 ---
 
@@ -565,6 +568,35 @@ evidence voting), but a meaningful fraction are this definitional mismatch.
 
 ---
 
+## Phase 5 — interface
+
+A Streamlit app wrapping the pipeline, deployed on Streamlit Community Cloud:
+**[fake-news-debunker.streamlit.app](https://fake-news-debunker-h8byas7dbwzxnm6wy2rtl7.streamlit.app)**.
+
+Type a claim; the app retrieves evidence (Fact Check API + web), runs the
+relevance gate + NLI stance + aggregation, and renders a verdict card plus every
+piece of evidence — each marked supports / refutes / doesn't-resolve /
+off-topic-filtered, with its source link and relevance score. Filtered and
+neutral evidence is shown dimmed rather than hidden, so the reasoning is visible.
+
+- `pipeline.py` — one `debunk(claim)` entry point over the Phase 2–4 modules.
+- `app.py` — the Streamlit UI; loads models once via `@st.cache_resource`.
+- Models load once and persist across interactions. First load ~30s; free-tier
+  apps sleep after inactivity and take ~30s to wake.
+
+**Design choices carried through to the UI.** The interface never emits a bare
+"FALSE": it shows the verdict, the confidence, the vote count, and the evidence.
+NOT ENOUGH INFO is a first-class outcome — the app abstains rather than guess
+when corroborating evidence is thin (e.g. a breaking-news headline with only one
+matching source). This is the Phase 1–4 thesis made tangible for a non-technical
+user: the tool reports what the evidence shows, not a black-box label.
+
+Keys are read from the environment (`GOOGLE_FACTCHECK_KEY`, `TAVILY_KEY`): a
+local `.env` in development, host secrets in deployment — same code path, via a
+`load_dotenv()` call that no-ops when no `.env` is present.
+
+---
+
 ## Repository
 
 ```
@@ -577,8 +609,10 @@ evidence voting), but a meaningful fraction are this definitional mismatch.
 ├── fever_load.py           # phase 4: FEVER parquet loader (script-free)
 ├── web_search.py           # phase 4: Tavily web retrieval, cached
 ├── fever_eval.py           # phase 4: full-pipeline FEVER evaluation harness
-├── debunker.py             # full retrieval pipeline scaffold
-├── requirements.txt
+├── pipeline.py             # phase 5: debunk() orchestration over all stages
+├── app.py                  # phase 5: Streamlit UI (deployed)
+├── requirements.txt        # app runtime deps (for deployment)
+├── .streamlit/config.toml  # disables the file-watcher (silences import noise)
 ├── .cache/factcheck/       # cached fact-check responses (gitignored)
 ├── .cache/web/             # cached web-search responses (gitignored)
 └── data/
@@ -587,7 +621,8 @@ evidence voting), but a meaningful fraction are this definitional mismatch.
 ```
 
 Add to `.gitignore`: `.cache/`, `.venv/`, `data/`, `models/`, `*.joblib`, and
-any `.env`. Never commit the API key.
+`.env`. Never commit API keys — in development they live in a gitignored `.env`;
+in deployment they are set as host secrets.
 
 ## Reproducing phase 1
 
@@ -649,6 +684,20 @@ python fever_eval.py --inspect "NOT ENOUGH INFO" REFUTES         # error analysi
 
 Web responses cache to `.cache/web/`; re-runs and `--inspect` cost no credits.
 The headline run is ~300 Tavily credits (within the free monthly tier).
+
+## Running phase 5 (the app)
+
+```bash
+pip install -r requirements.txt
+# put both keys in a .env file (gitignored):
+#   GOOGLE_FACTCHECK_KEY=your-key
+#   TAVILY_KEY=tvly-your-key
+streamlit run app.py
+```
+
+To deploy on Streamlit Community Cloud: push to GitHub, connect the repo at
+share.streamlit.io, set `app.py` as the entry point, and add the two keys under
+**Advanced settings → Secrets** in TOML form (`KEY = "value"`, with the quotes).
 
 ---
 
@@ -712,15 +761,28 @@ claim) and a principled combined gate remain, both gated on Phase 4 measurement.
 to quantify the FEVER-protocol-mismatch fraction, and testing `--min-votes 1` to
 address REFUTES→NEI leakage.
 
-**Phase 5 — interface.** Streamlit. Paste a URL, get claim-by-claim verdicts
-with clickable sources.
+**Phase 5 — interface (complete).** Streamlit app in `app.py` / `pipeline.py`,
+deployed on Streamlit Community Cloud. Claim in, verdict card + per-source
+evidence out, with filtered evidence shown dimmed for transparency.
 
-**Design constraints carried forward**
+**Possible future work**
+
+- **Source-credibility weighting.** The pipeline treats a satirical source (e.g.
+  The Onion) and a wire service as equal votes; it tracks each source's URL, so
+  down-weighting known-satire or low-authority domains is a natural extension.
+  (Surfaced by a live test on the "eat one small rock per day" claim, where an
+  Onion article scored entailment — NLI cannot detect satire.)
+- **Systematic NEI adjudication** to quantify the FEVER-protocol-mismatch fraction
+  from §4.6.
+- **A principled combined relevance gate** (cross-encoder + NLI-neutral), now that
+  Phase 4 shows a usable operating point exists on diverse claims.
+
+**Design constraints carried through the whole system**
 
 - Cache every search response keyed by claim string. Free tiers are small and a
   retry loop can exhaust a month's quota in an afternoon.
 - Never output a bare "FALSE". Output evidence and stance; let NOT ENOUGH INFO
-  be a frequent, respectable answer.
+  be a frequent, respectable answer — including in the deployed UI.
 - The classifier is a triage prior deciding what gets expensive retrieval —
   never a verdict.
 
